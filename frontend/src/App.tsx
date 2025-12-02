@@ -1,0 +1,342 @@
+import React, { useState, useRef, useEffect } from 'react';
+import { Send, Dumbbell, Users, Calendar, Award } from 'lucide-react';
+import axios from 'axios';
+
+const API_BASE_URL = 'http://localhost:3000';
+
+interface Message {
+  id: number;
+  text: string;
+  sender: 'user' | 'bot';
+  timestamp: Date;
+}
+
+interface LeadInfo {
+  name: string;
+  email: string;
+  phone: string;
+}
+
+export default function GymLeadAssistant() {
+  const [messages, setMessages] = useState<Message[]>([
+    { id: 1, text: "Hi! I'm your fitness assistant. Ready to transform your body and life? Tell me about your fitness goals!", sender: 'bot', timestamp: new Date() }
+  ]);
+  const [inputValue, setInputValue] = useState('');
+  const [isTyping, setIsTyping] = useState(false);
+  const [showLeadPopup, setShowLeadPopup] = useState(false);
+  const [leadInfo, setLeadInfo] = useState<LeadInfo>({ name: '', email: '', phone: '' });
+  const [isLoading, setIsLoading] = useState(false);
+  const [sessionId, setSessionId] = useState<string>('');
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  const chatContainerRef = useRef<HTMLDivElement>(null);
+
+  const scrollToBottom = () => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  };
+
+  useEffect(() => {
+    scrollToBottom();
+  }, [messages, isTyping]);
+
+  const handleSendMessage = async () => {
+    if (!inputValue.trim()) return;
+
+    const userMessage: Message = {
+      id: Date.now(),
+      text: inputValue,
+      sender: 'user',
+      timestamp: new Date()
+    };
+
+    setMessages(prev => [...prev, userMessage]);
+    setInputValue('');
+    setIsTyping(true);
+    setIsLoading(true);
+
+    try {
+      // Build messages array for the API
+      const messagesToSend = messages
+        .filter(msg => msg.id !== 1) // Skip initial greeting
+        .map(msg => ({
+          role: msg.sender === 'user' ? 'user' : 'assistant',
+          content: msg.text
+        }));
+      
+      messagesToSend.push({
+        role: 'user',
+        content: inputValue
+      });
+
+      // Call backend /chat endpoint
+      const response = await axios.post(`${API_BASE_URL}/chat`, {
+        sessionId: sessionId || undefined,
+        messages: messagesToSend
+      });
+
+      const data = response.data;
+      
+      // Update or set session ID
+      if (data.sessionId && !sessionId) {
+        setSessionId(data.sessionId);
+      }
+
+      // Add bot response
+      const botMessage: Message = {
+        id: Date.now() + 1,
+        text: data.aiReply || 'Sorry, I could not process your request.',
+        sender: 'bot',
+        timestamp: new Date()
+      };
+
+      setMessages(prev => [...prev, botMessage]);
+      setIsTyping(false);
+      setIsLoading(false);
+
+      // Check if lead data was extracted and show popup
+      if (data.leadData) {
+        setShowLeadPopup(true);
+      }
+
+      // Show lead popup after several messages
+      if (messages.length >= 8 && !data.leadData) {
+        setTimeout(() => setShowLeadPopup(true), 1000);
+      }
+    } catch (error: any) {
+      setIsTyping(false);
+      setIsLoading(false);
+      
+      const errorMessage: Message = {
+        id: Date.now() + 1,
+        text: error.response?.data?.error || "Sorry, I'm having trouble connecting. Please try again!",
+        sender: 'bot',
+        timestamp: new Date()
+      };
+      setMessages(prev => [...prev, errorMessage]);
+    }
+  };
+
+  const handleKeyPress = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      handleSendMessage();
+    }
+  };
+
+  const handleLeadSubmit = async () => {
+    if (leadInfo.name && leadInfo.email && leadInfo.phone) {
+      try {
+      // Send lead info to backend via the chat endpoint
+      await axios.post(`${API_BASE_URL}/chat`, {
+        sessionId: sessionId,
+        messages: [
+          {
+            role: 'user',
+            content: `Lead submission: Name: ${leadInfo.name}, Email: ${leadInfo.email}, Phone: ${leadInfo.phone}`
+          }
+        ]
+      });        setShowLeadPopup(false);
+        
+        const confirmMessage: Message = {
+          id: Date.now(),
+          text: `Thanks ${leadInfo.name}! 🎉 We've received your information. Our team will contact you within 24 hours to schedule your FREE consultation and gym tour!`,
+          sender: 'bot',
+          timestamp: new Date()
+        };
+        setMessages(prev => [...prev, confirmMessage]);
+        setLeadInfo({ name: '', email: '', phone: '' });
+      } catch (error) {
+        console.error('Lead submission error:', error);
+      }
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-gradient-to-br from-gray-900 via-gray-800 to-black text-white">
+      {/* Hero Section */}
+      <header className="relative overflow-hidden border-b border-gray-700">
+        <div className="absolute inset-0 bg-gradient-to-r from-red-600/20 to-orange-600/20"></div>
+        <div className="relative max-w-6xl mx-auto px-4 py-12">
+          <div className="flex flex-col md:flex-row items-center justify-between gap-4 mb-8">
+            <div className="flex items-center gap-3">
+              <div className="w-12 h-12 bg-gradient-to-br from-red-500 to-orange-500 rounded-lg flex items-center justify-center">
+                <Dumbbell className="w-7 h-7" />
+              </div>
+              <div>
+                <h1 className="text-3xl font-bold">IRON FORGE GYM</h1>
+                <p className="text-gray-400 text-sm">Transform Your Body, Elevate Your Life</p>
+              </div>
+            </div>
+            <div className="flex gap-3">
+              <button className="px-6 py-3 bg-gradient-to-r from-red-600 to-orange-600 rounded-lg font-semibold hover:from-red-700 hover:to-orange-700 transition-all duration-300 shadow-lg shadow-red-600/50">
+                Join Now
+              </button>
+              <button className="px-6 py-3 border-2 border-red-600 rounded-lg font-semibold hover:bg-red-600/20 transition-all duration-300">
+                Free Trial
+              </button>
+            </div>
+          </div>
+
+          {/* Stats */}
+          <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+            {[
+              { icon: Users, label: '5000+ Members', value: 'Active' },
+              { icon: Award, label: 'Certified Trainers', value: '50+' },
+              { icon: Calendar, label: 'Classes/Week', value: '200+' },
+              { icon: Dumbbell, label: 'Equipment', value: 'Premium' }
+            ].map((stat, idx) => (
+              <div key={idx} className="bg-gray-800/50 backdrop-blur-sm rounded-lg p-4 border border-gray-700">
+                <stat.icon className="w-6 h-6 text-red-500 mb-2" />
+                <div className="text-2xl font-bold text-white">{stat.value}</div>
+                <div className="text-sm text-gray-400">{stat.label}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      </header>
+
+      {/* Chat Interface */}
+      <main className="max-w-4xl mx-auto px-4 py-8">
+        <div className="bg-gray-800/50 backdrop-blur-sm rounded-2xl border border-gray-700 shadow-2xl overflow-hidden">
+          {/* Chat Header */}
+          <div className="bg-gradient-to-r from-gray-800 to-gray-900 px-6 py-4 border-b border-gray-700">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 bg-gradient-to-br from-red-500 to-orange-500 rounded-full flex items-center justify-center">
+                  <Dumbbell className="w-5 h-5" />
+                </div>
+                <div>
+                  <h3 className="font-semibold">AI Fitness Assistant</h3>
+                  <p className="text-xs text-gray-400">Online • Ready to help you succeed</p>
+                </div>
+              </div>
+              {sessionId && <span className="text-xs text-gray-500">Session: {sessionId.slice(0, 8)}</span>}
+            </div>
+          </div>
+
+          {/* Messages Container */}
+          <div 
+            ref={chatContainerRef}
+            className="h-[500px] overflow-y-auto p-6 space-y-4"
+            style={{ scrollbarWidth: 'thin', scrollbarColor: '#374151 #111827' }}
+          >
+            {messages.map((message) => (
+              <div
+                key={message.id}
+                className={`flex ${message.sender === 'user' ? 'justify-end' : 'justify-start'}`}
+              >
+                <div
+                  className={`max-w-[80%] rounded-2xl px-5 py-3 ${
+                    message.sender === 'user'
+                      ? 'bg-gradient-to-r from-red-600 to-orange-600 text-white rounded-br-none'
+                      : 'bg-gray-700/50 text-gray-100 rounded-bl-none border border-gray-600'
+                  }`}
+                >
+                  <p className="text-sm leading-relaxed">{message.text}</p>
+                  <span className="text-xs opacity-60 mt-1 block">
+                    {message.timestamp.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
+                  </span>
+                </div>
+              </div>
+            ))}
+
+            {isTyping && (
+              <div className="flex justify-start">
+                <div className="bg-gray-700/50 rounded-2xl rounded-bl-none px-5 py-3 border border-gray-600">
+                  <div className="flex gap-1">
+                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
+                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+                    <div className="w-2 h-2 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+                  </div>
+                </div>
+              </div>
+            )}
+            <div ref={messagesEndRef} />
+          </div>
+
+          {/* Input Area */}
+          <div className="bg-gray-800/50 backdrop-blur-sm px-6 py-4 border-t border-gray-700">
+            <div className="flex gap-3">
+              <input
+                type="text"
+                value={inputValue}
+                onChange={(e) => setInputValue(e.target.value)}
+                onKeyPress={handleKeyPress}
+                placeholder="Type your message..."
+                disabled={isLoading}
+                className="flex-1 bg-gray-700/50 border border-gray-600 rounded-xl px-4 py-3 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50"
+              />
+              <button
+                onClick={handleSendMessage}
+                disabled={isLoading || !inputValue.trim()}
+                className="bg-gradient-to-r from-red-600 to-orange-600 rounded-xl px-6 py-3 font-semibold hover:from-red-700 hover:to-orange-700 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-red-600/30"
+              >
+                <Send className="w-5 h-5" />
+              </button>
+            </div>
+          </div>
+        </div>
+      </main>
+
+      {/* Lead Popup */}
+      {showLeadPopup && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-gradient-to-br from-gray-800 to-gray-900 rounded-2xl p-8 max-w-md w-full border border-gray-700 shadow-2xl animate-in fade-in duration-300">
+            <div className="text-center mb-6">
+              <div className="w-16 h-16 bg-gradient-to-br from-red-500 to-orange-500 rounded-full flex items-center justify-center mx-auto mb-4">
+                <Award className="w-8 h-8" />
+              </div>
+              <h2 className="text-2xl font-bold mb-2">Claim Your FREE Consultation!</h2>
+              <p className="text-gray-400">Get personalized training plan + gym tour</p>
+            </div>
+
+            <div className="space-y-4">
+              <input
+                type="text"
+                placeholder="Full Name"
+                value={leadInfo.name}
+                onChange={(e) => setLeadInfo({ ...leadInfo, name: e.target.value })}
+                className="w-full bg-gray-700/50 border border-gray-600 rounded-xl px-4 py-3 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-red-500"
+              />
+              <input
+                type="email"
+                placeholder="Email Address"
+                value={leadInfo.email}
+                onChange={(e) => setLeadInfo({ ...leadInfo, email: e.target.value })}
+                className="w-full bg-gray-700/50 border border-gray-600 rounded-xl px-4 py-3 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-red-500"
+              />
+              <input
+                type="tel"
+                placeholder="Phone Number"
+                value={leadInfo.phone}
+                onChange={(e) => setLeadInfo({ ...leadInfo, phone: e.target.value })}
+                className="w-full bg-gray-700/50 border border-gray-600 rounded-xl px-4 py-3 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-red-500"
+              />
+              <div className="flex gap-3 mt-6">
+                <button
+                  onClick={() => setShowLeadPopup(false)}
+                  className="flex-1 px-6 py-3 border-2 border-gray-600 rounded-xl font-semibold hover:bg-gray-700/50 transition-all duration-300"
+                >
+                  Later
+                </button>
+                <button
+                  onClick={handleLeadSubmit}
+                  className="flex-1 px-6 py-3 bg-gradient-to-r from-red-600 to-orange-600 rounded-xl font-semibold hover:from-red-700 hover:to-orange-700 transition-all duration-300 shadow-lg shadow-red-600/50"
+                >
+                  Get Started
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Footer Branding */}
+      <footer className="max-w-6xl mx-auto px-4 py-6 mt-12 border-t border-gray-800">
+        <div className="text-center text-gray-500 text-sm">
+          <p>Powered by <span className="text-red-500 font-semibold">FitTech AI Solutions</span></p>
+          <p className="mt-1">© 2024 Iron Forge Gym. Premium AI-Powered Lead Generation Demo</p>
+        </div>
+      </footer>
+    </div>
+  );
+}
