@@ -27,8 +27,12 @@ export default function GymLeadAssistant() {
   const [leadInfo, setLeadInfo] = useState<LeadInfo>({ name: '', email: '', phone: '' });
   const [isLoading, setIsLoading] = useState(false);
   const [sessionId, setSessionId] = useState<string>('');
+  const [listening, setListening] = useState(false);
+  const [interimTranscript, setInterimTranscript] = useState('');
+  const [voiceConfirm, setVoiceConfirm] = useState<any>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const chatContainerRef = useRef<HTMLDivElement>(null);
+  const recognitionRef = useRef<any>(null);
 
   const scrollToBottom = () => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -115,6 +119,134 @@ export default function GymLeadAssistant() {
     }
   };
 
+  // --- Voice agent integration (Web Speech API STT + SpeechSynthesis TTS) ---
+  const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition || null;
+
+  const parseLead = (text: string) => {
+    const match = text.match(/LEAD_DATA:\s*([\s\S]*)/i);
+    if (!match) return null;
+    const body = match[1];
+    const name = (body.match(/Name:\s*(.*)/i)||[])[1]||'';
+    const contact = (body.match(/Contact:\s*(.*)/i)||[])[1]||'';
+    const goal = (body.match(/Goal:\s*(.*)/i)||[])[1]||'';
+    const intent = (body.match(/Intent:\s*(.*)/i)||[])[1]||'';
+    const time = (body.match(/Time:\s*(.*)/i)||[])[1]||'';
+    if (!name && !contact && !goal && !intent && !time) return null;
+    return { name: name.trim(), contact: contact.trim(), goal: goal.trim(), intent: intent.trim(), time: time.trim() };
+  };
+
+  const sendLeadToN8n = async (lead: any) => {
+    try {
+      await axios.post(`${API_BASE_URL}/n8n`, lead);
+      setVoiceConfirm(lead);
+    } catch (err) {
+      console.error('Failed to send lead to n8n proxy', err);
+    }
+  };
+
+  const speakText = (text: string) => {
+    if (!window.speechSynthesis) return;
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.lang = 'en-US';
+    utter.rate = 1.0;
+    utter.onend = () => {
+      // resume recognition after speaking
+      if (recognitionRef.current && !listening) {
+        try { recognitionRef.current.start(); setListening(true); } catch(e){}
+      }
+    };
+    utter.onerror = (e) => { console.error('TTS error', e); };
+    // pause recognition while speaking
+    try { recognitionRef.current?.stop(); } catch(e){}
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utter);
+  };
+
+  const sendUserText = async (text: string) => {
+    if (!text || !text.trim()) return;
+    const userMessage: Message = { id: Date.now(), text, sender: 'user', timestamp: new Date() };
+    setMessages(prev => [...prev, userMessage]);
+    setIsTyping(true);
+    setIsLoading(true);
+
+    try {
+      const messagesToSend = messages
+        .filter(msg => msg.id !== 1)
+        .map(msg => ({ role: msg.sender === 'user' ? 'user' : 'assistant', content: msg.text }));
+      messagesToSend.push({ role: 'user', content: text });
+
+      const response = await axios.post(`${API_BASE_URL}/chat`, { sessionId: sessionId || undefined, messages: messagesToSend });
+      const data = response.data;
+      if (data.sessionId && !sessionId) setSessionId(data.sessionId);
+      const aiReplyText = data.aiReply || 'Sorry, I could not process your request.';
+      const botMessage: Message = { id: Date.now()+1, text: aiReplyText, sender: 'bot', timestamp: new Date() };
+      setMessages(prev => [...prev, botMessage]);
+
+      // handle lead extraction
+      if (/LEAD_DATA:/i.test(aiReplyText)) {
+        const lead = parseLead(aiReplyText);
+        if (lead) await sendLeadToN8n(lead);
+      }
+
+      // speak AI reply
+      speakText(aiReplyText);
+      setIsTyping(false);
+      setIsLoading(false);
+    } catch (err) {
+      console.error('Voice agent send error', err);
+      setIsTyping(false);
+      setIsLoading(false);
+    }
+  };
+
+  const startRecognition = () => {
+    if (!SpeechRecognition) { alert('SpeechRecognition not supported in this browser. Use Chrome/Edge.'); return; }
+    if (recognitionRef.current) {
+      try { recognitionRef.current.start(); setListening(true); } catch(e){}
+      return;
+    }
+    const r = new SpeechRecognition();
+    r.lang = 'en-US';
+    r.interimResults = true;
+    r.continuous = true;
+
+    r.onstart = () => { setListening(true); setInterimTranscript(''); };
+    r.onerror = (e: any) => { console.error('Recognition error', e); setListening(false); };
+    r.onend = () => { setListening(false); };
+
+    let interim = '';
+    r.onresult = (event: any) => {
+      interim = '';
+      for (let i = event.resultIndex; i < event.results.length; ++i) {
+        const res = event.results[i];
+        const t = res[0].transcript.trim();
+        if (res.isFinal) {
+          setInterimTranscript('');
+          sendUserText(t);
+        } else {
+          interim += t + ' ';
+          setInterimTranscript(interim);
+        }
+      }
+    };
+
+    recognitionRef.current = r;
+    try { r.start(); setListening(true); } catch(e) { console.error('Failed to start recognition', e); }
+  };
+
+  const stopRecognition = () => {
+    try { recognitionRef.current?.stop(); } catch(e){}
+    setListening(false);
+    setInterimTranscript('');
+  };
+
+  useEffect(() => {
+    return () => {
+      try { recognitionRef.current?.stop(); } catch(e){}
+      recognitionRef.current = null;
+    };
+  }, []);
+
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
@@ -125,17 +257,32 @@ export default function GymLeadAssistant() {
   const handleLeadSubmit = async () => {
     if (leadInfo.name && leadInfo.email && leadInfo.phone) {
       try {
-      // Send lead info to backend via the chat endpoint
-      await axios.post(`${API_BASE_URL}/chat`, {
-        sessionId: sessionId,
-        messages: [
-          {
-            role: 'user',
-            content: `Lead submission: Name: ${leadInfo.name}, Email: ${leadInfo.email}, Phone: ${leadInfo.phone}`
-          }
-        ]
-      });        setShowLeadPopup(false);
-        
+        // Build a lead payload and forward to n8n proxy
+        const leadPayload = { name: leadInfo.name, contact: leadInfo.email || leadInfo.phone, goal: '', intent: '', time: '' };
+        try {
+          await axios.post(`${API_BASE_URL}/n8n`, leadPayload);
+          setVoiceConfirm(leadPayload);
+        } catch (err) {
+          console.warn('n8n forwarding failed (will continue):', err);
+        }
+
+        // Also inform the chat session (so AI has context) using a LEAD_DATA block
+        try {
+          await axios.post(`${API_BASE_URL}/chat`, {
+            sessionId: sessionId || undefined,
+            messages: [
+              {
+                role: 'user',
+                content: `LEAD_DATA:\nName: ${leadInfo.name}\nContact: ${leadInfo.email || leadInfo.phone}\nGoal:\nIntent:\nTime:`
+              }
+            ]
+          });
+        } catch (err) {
+          console.warn('chat notify failed (non-blocking):', err);
+        }
+
+        setShowLeadPopup(false);
+
         const confirmMessage: Message = {
           id: Date.now(),
           text: `Thanks ${leadInfo.name}! 🎉 We've received your information. Our team will contact you within 24 hours to schedule your FREE consultation and gym tour!`,
@@ -256,28 +403,53 @@ export default function GymLeadAssistant() {
           {/* Input Area */}
           <div className="bg-gray-800/50 backdrop-blur-sm px-6 py-4 border-t border-gray-700">
             <div className="flex gap-3">
-              <input
-                type="text"
-                value={inputValue}
-                onChange={(e) => setInputValue(e.target.value)}
-                onKeyPress={handleKeyPress}
-                placeholder="Type your message..."
-                disabled={isLoading}
-                className="flex-1 bg-gray-700/50 border border-gray-600 rounded-xl px-4 py-3 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50"
-              />
-              <button
-                onClick={handleSendMessage}
-                disabled={isLoading || !inputValue.trim()}
-                className="bg-gradient-to-r from-red-600 to-orange-600 rounded-xl px-6 py-3 font-semibold hover:from-red-700 hover:to-orange-700 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-red-600/30"
-              >
-                <Send className="w-5 h-5" />
-              </button>
+              <div className="flex-1">
+                <input
+                  type="text"
+                  value={inputValue}
+                  onChange={(e) => setInputValue(e.target.value)}
+                  onKeyPress={handleKeyPress}
+                  placeholder="Type your message..."
+                  disabled={isLoading}
+                  className="w-full bg-gray-700/50 border border-gray-600 rounded-xl px-4 py-3 text-white placeholder-gray-400 focus:outline-none focus:ring-2 focus:ring-red-500 disabled:opacity-50"
+                />
+                {interimTranscript && (
+                  <div className="text-xs text-teal-300 mt-1">Live: {interimTranscript}</div>
+                )}
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={() => {
+                    if (listening) stopRecognition(); else startRecognition();
+                  }}
+                  title="Start/Stop voice"
+                  className={`px-4 py-3 rounded-xl border ${listening ? 'bg-teal-600 text-white' : 'bg-gray-700/30 text-white'} hover:opacity-90`}
+                >
+                  {listening ? '🟢 Listening' : '🎤 Voice'}
+                </button>
+
+                <button
+                  onClick={handleSendMessage}
+                  disabled={isLoading || !inputValue.trim()}
+                  className="bg-gradient-to-r from-red-600 to-orange-600 rounded-xl px-6 py-3 font-semibold hover:from-red-700 hover:to-orange-700 transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed shadow-lg shadow-red-600/30"
+                >
+                  <Send className="w-5 h-5" />
+                </button>
+              </div>
             </div>
           </div>
         </div>
       </main>
 
       {/* Lead Popup */}
+      {/* Voice lead confirmation (sent automatically when AI outputs LEAD_DATA) */}
+      {voiceConfirm && (
+        <div className="fixed bottom-6 right-6 bg-teal-700/90 text-white rounded-lg p-4 z-50 shadow-lg">
+          <div className="font-semibold">Lead forwarded</div>
+          <div className="text-sm">{voiceConfirm.name} — {voiceConfirm.contact}</div>
+        </div>
+      )}
       {showLeadPopup && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
           <div className="bg-gradient-to-br from-gray-800 to-gray-900 rounded-2xl p-8 max-w-md w-full border border-gray-700 shadow-2xl animate-in fade-in duration-300">
