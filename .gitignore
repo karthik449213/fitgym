@@ -1,0 +1,45 @@
+# Environment variables (NEVER commit these!)
+.env
+.env.local
+.env.*.local
+
+# API Keys and secrets
+*_API_KEY*
+*_SECRET*
+*_PASSWORD*
+credentials.json
+secrets.json
+.aws/
+.ssh/
+
+# Database files (local development)
+*.db
+*.sqlite
+*.sqlite3
+fitgym_sessions.db
+
+# Node modules and build artifacts
+node_modules/
+dist/
+build/
+*.log
+npm-debug.log*
+yarn-error.log*
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Cache
+.cache/
+.temp/
+temp/
