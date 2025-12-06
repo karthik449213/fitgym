@@ -42,79 +42,72 @@ export default function GymLeadAssistant() {
     scrollToBottom();
   }, [messages, isTyping]);
 
+  // Restore session from localStorage on mount (if available)
+  useEffect(() => {
+    const sid = localStorage.getItem('fitgym_sessionId');
+    if (sid) {
+      setSessionId(sid);
+      // fetch session messages from backend
+      axios.get(`${API_BASE_URL}/session/${sid}`)
+        .then(resp => {
+          const data = resp.data;
+          if (Array.isArray(data.messages) && data.messages.length) {
+            // map server messages to local Message shape
+            const mapped = data.messages
+              .filter((m: any) => m.role && m.role !== 'system')
+              .map((m: any, idx: number) => ({
+                id: Date.now() + idx + 2,
+                text: m.content,
+                sender: m.role === 'user' ? 'user' : 'bot',
+                timestamp: new Date()
+              } as Message));
+            setMessages(prev => {
+              // Keep initial greeting, then loaded conversation
+              const base = prev && prev.length ? prev.filter(p => p.id === 1) : [];
+              return [...base, ...mapped];
+            });
+          }
+        })
+        .catch(err => {
+          console.warn('Failed to restore session', err);
+        });
+    }
+  }, []);
+
   const handleSendMessage = async () => {
     if (!inputValue.trim()) return;
-
-    const userMessage: Message = {
-      id: Date.now(),
-      text: inputValue,
-      sender: 'user',
-      timestamp: new Date()
-    };
-
+    const userMessage: Message = { id: Date.now(), text: inputValue, sender: 'user', timestamp: new Date() };
+    // show immediately in UI
     setMessages(prev => [...prev, userMessage]);
     setInputValue('');
     setIsTyping(true);
     setIsLoading(true);
 
     try {
-      // Build messages array for the API
-      const messagesToSend = messages
-        .filter(msg => msg.id !== 1) // Skip initial greeting
-        .map(msg => ({
-          role: msg.sender === 'user' ? 'user' : 'assistant',
-          content: msg.text
-        }));
-      
-      messagesToSend.push({
-        role: 'user',
-        content: inputValue
-      });
-
-      // Call backend /chat endpoint
+      // Send only the new user message to backend. Backend keeps full session history server-side.
       const response = await axios.post(`${API_BASE_URL}/chat`, {
         sessionId: sessionId || undefined,
-        messages: messagesToSend
+        messages: [{ role: 'user', content: inputValue }]
       });
 
       const data = response.data;
-      
-      // Update or set session ID
-      if (data.sessionId && !sessionId) {
+      // persist session id
+      if (data.sessionId) {
         setSessionId(data.sessionId);
+        try { localStorage.setItem('fitgym_sessionId', data.sessionId); } catch (e) {}
       }
 
-      // Add bot response
-      const botMessage: Message = {
-        id: Date.now() + 1,
-        text: data.aiReply || 'Sorry, I could not process your request.',
-        sender: 'bot',
-        timestamp: new Date()
-      };
-
+      const botMessage: Message = { id: Date.now() + 1, text: data.aiReply || 'Sorry, I could not process your request.', sender: 'bot', timestamp: new Date() };
       setMessages(prev => [...prev, botMessage]);
       setIsTyping(false);
       setIsLoading(false);
 
-      // Check if lead data was extracted and show popup
-      if (data.leadData) {
-        setShowLeadPopup(true);
-      }
-
-      // Show lead popup after several messages
-      if (messages.length >= 8 && !data.leadData) {
-        setTimeout(() => setShowLeadPopup(true), 1000);
-      }
+      if (data.leadData) setShowLeadPopup(true);
+      if (messages.length >= 8 && !data.leadData) setTimeout(() => setShowLeadPopup(true), 1000);
     } catch (error: any) {
       setIsTyping(false);
       setIsLoading(false);
-      
-      const errorMessage: Message = {
-        id: Date.now() + 1,
-        text: error.response?.data?.error || "Sorry, I'm having trouble connecting. Please try again!",
-        sender: 'bot',
-        timestamp: new Date()
-      };
+      const errorMessage: Message = { id: Date.now() + 1, text: error.response?.data?.error || "Sorry, I'm having trouble connecting. Please try again!", sender: 'bot', timestamp: new Date() };
       setMessages(prev => [...prev, errorMessage]);
     }
   };
@@ -170,14 +163,13 @@ export default function GymLeadAssistant() {
     setIsLoading(true);
 
     try {
-      const messagesToSend = messages
-        .filter(msg => msg.id !== 1)
-        .map(msg => ({ role: msg.sender === 'user' ? 'user' : 'assistant', content: msg.text }));
-      messagesToSend.push({ role: 'user', content: text });
-
-      const response = await axios.post(`${API_BASE_URL}/chat`, { sessionId: sessionId || undefined, messages: messagesToSend });
+      // send only the new user utterance; server maintains the session history
+      const response = await axios.post(`${API_BASE_URL}/chat`, { sessionId: sessionId || undefined, messages: [{ role: 'user', content: text }] });
       const data = response.data;
-      if (data.sessionId && !sessionId) setSessionId(data.sessionId);
+      if (data.sessionId) {
+        setSessionId(data.sessionId);
+        try { localStorage.setItem('fitgym_sessionId', data.sessionId); } catch(e){}
+      }
       const aiReplyText = data.aiReply || 'Sorry, I could not process your request.';
       const botMessage: Message = { id: Date.now()+1, text: aiReplyText, sender: 'bot', timestamp: new Date() };
       setMessages(prev => [...prev, botMessage]);

@@ -88,6 +88,25 @@ function extractLeadData(aiReply) {
   return null;
 }
 
+// Helper: Try to extract basic lead fields from a plain user message
+function extractFromUserMessage(text) {
+  if (!text || typeof text !== 'string') return {};
+  const out = {};
+  // simple name patterns: "my name is John Doe", "I'm John", "I am John"
+  const nameMatch = text.match(/(?:my name is|i'm|i am)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/i);
+  if (nameMatch) out.name = nameMatch[1].trim();
+
+  // email
+  const emailMatch = text.match(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/i);
+  if (emailMatch) out.contact = emailMatch[0].trim();
+
+  // phone-like (7-15 digits, allow spaces, dashes, parentheses)
+  const phoneMatch = text.match(/(?:\+?\d[\d ()-]{6,}\d)/);
+  if (phoneMatch) out.contact = out.contact || phoneMatch[0].trim();
+
+  return out;
+}
+
 // Helper: Send lead data to n8n webhook
 async function sendLeadToWebhook(leadData) {
   const webhookUrl = process.env.N8N_WEBHOOK_URL;
@@ -133,7 +152,17 @@ app.post('/chat', async (req, res) => {
       sessions[sid] = [];
     }
     if (!sessions[sid]) sessions[sid] = [];
+    // Append incoming messages (frontend should send only the new message(s)).
     sessions[sid].push(...messages);
+    // Try to extract basic lead info from incoming user messages and persist to sessionsMeta
+    for (const m of messages) {
+      if (m && m.role === 'user' && typeof m.content === 'string') {
+        const extracted = extractFromUserMessage(m.content);
+        if (extracted && Object.keys(extracted).length) {
+          sessionsMeta[sid] = Object.assign({}, sessionsMeta[sid] || {}, extracted);
+        }
+      }
+    }
     if (!sessionsMeta[sid]) sessionsMeta[sid] = {};
 
     // Build messages for AI: if we have known lead metadata, add it as a short system-level message so model remembers
@@ -155,6 +184,13 @@ app.post('/chat', async (req, res) => {
     const aiReply = await getAIReply(messagesForAI);
     logger.info({ sessionId: sid, aiReply });
 
+    // Persist assistant reply into the session history so future requests have full convo
+    try {
+      sessions[sid].push({ role: 'assistant', content: aiReply });
+    } catch (e) {
+      logger.warn('Failed to append assistant reply to session', { sessionId: sid, err: e?.message });
+    }
+
     // Extract lead data
     const leadData = extractLeadData(aiReply);
     let leadSent = false;
@@ -174,6 +210,15 @@ app.post('/chat', async (req, res) => {
     res.status(500).json({ error: 'Internal server error' });
   }
 });
+
+    // GET /session/:id - return stored session messages and metadata
+    app.get('/session/:id', (req, res) => {
+      const id = req.params.id;
+      if (!id) return res.status(400).json({ error: 'Missing session id' });
+      const convo = sessions[id] || [];
+      const meta = sessionsMeta[id] || {};
+      res.json({ sessionId: id, messages: convo, meta });
+    });
 
 // Health check
 app.get('/', (req, res) => {
