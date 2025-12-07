@@ -29,9 +29,6 @@ const logger = winston.createLogger({
 app.use(cors());
 app.use(express.json());
 
-// Serve optional static voice-call UI
-app.use('/voice-call', express.static(path.join(__dirname, '..', 'frontend', 'voice-call')));
-
 // In-memory session store (use Redis for production)
 const sessions = {};
 // In-memory session metadata to persist extracted lead fields across the session
@@ -39,7 +36,7 @@ const sessionsMeta = {};
 
 // System prompt for AI behavior (exact required prompt)
 const SYSTEM_PROMPT = process.env.SYSTEM_PROMPT ||
-  "You are a professional gym receptionist AI assistant. Speak naturally and be concise (aim for under 30 words). Ask only one question at a time. Remember and reuse user-provided information (for example, name and contact) in later replies — do not ask for it again. Confirm each answer briefly after the user replies. Collect name, contact, fitness goal, intent, and preferred time. When enough info is collected, output exactly:\nLEAD_DATA:\nName:\nContact:\nGoal:\nIntent:\nTime:\nThen stop asking questions and do not continue the conversation.";
+  "You are a professional gym receptionist AI assistant. Speak naturally and be concise (aim for under 30 words). Ask only one question at a time. Remember and reuse user-provided information (for example, name and email) in later replies — do not ask for it again. Confirm each answer briefly after the user replies. Collect name, email address, fitness goal, intent, and preferred time. When enough info is collected, output exactly:\nLEAD_DATA:\nName:\nContact:\nGoal:\nIntent:\nTime:\nThen stop asking questions and do not continue the conversation.";
 
 // Helper: Verify Groq API key is configured
 function validateGroqConfig() {

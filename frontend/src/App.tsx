@@ -239,6 +239,15 @@ export default function GymLeadAssistant() {
     };
   }, []);
 
+  // Auto-start voice listening on mount
+  useEffect(() => {
+    // Delay slightly to ensure component is fully mounted
+    const timer = setTimeout(() => {
+      startRecognition();
+    }, 500);
+    return () => clearTimeout(timer);
+  }, []);
+
   const handleKeyPress = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
