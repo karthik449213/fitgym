@@ -33,6 +33,8 @@ app.use(express.json());
 const sessions = {};
 // In-memory session metadata to persist extracted lead fields across the session
 const sessionsMeta = {};
+// In-memory members store (for demo / webhook forwarding). In production use a DB.
+const members = {};
 
 // System prompt for AI behavior (exact required prompt)
 const SYSTEM_PROMPT = process.env.SYSTEM_PROMPT ||
@@ -78,11 +80,44 @@ function extractLeadData(aiReply) {
   const goal = data.match(/Goal:\s*(.*)/i)?.[1]?.trim() || '';
   const intent = data.match(/Intent:\s*(.*)/i)?.[1]?.trim() || '';
   const time = data.match(/Time:\s*(.*)/i)?.[1]?.trim() || '';
+  // Optional membership fields
+  const startDate = data.match(/StartDate:\s*(\d{4}-\d{2}-\d{2})/i)?.[1]?.trim() || '';
+  const membershipType = data.match(/MembershipType:\s*(.*)/i)?.[1]?.trim() || '';
   // Return lead object if at least one meaningful field is present.
-  if (name || contact || goal || intent || time) {
-    return { name, contact, goal, intent, time };
+  if (name || contact || goal || intent || time || startDate || membershipType) {
+    return { name, contact, goal, intent, time, startDate, membershipType };
   }
   return null;
+}
+
+// Helper: calculate expiry date (returns YYYY-MM-DD)
+function calculateExpiryDate(startDateStr, membershipType) {
+  if (!startDateStr || !membershipType) return null;
+  // Parse startDate as UTC date (yyyy-mm-dd)
+  const parts = startDateStr.split('-').map(Number);
+  if (parts.length !== 3) return null;
+  // Create date in UTC to avoid timezone shifts
+  const dt = new Date(Date.UTC(parts[0], parts[1] - 1, parts[2]));
+
+  let daysToAdd = 0;
+  const mt = membershipType.toLowerCase();
+  if (mt.includes('1 month') || mt === '1') daysToAdd = 30;
+  else if (mt.includes('3 month') || mt === '3') daysToAdd = 90;
+  else if (mt.includes('6 month') || mt === '6') daysToAdd = 180;
+  else if (mt.includes('12 month') || mt === '12' || mt.includes('12 months')) daysToAdd = 365;
+  else {
+    // try to parse numeric months
+    const num = parseInt(membershipType, 10);
+    if (!isNaN(num)) daysToAdd = num * 30;
+  }
+
+  if (!daysToAdd) return null;
+  const expiry = new Date(dt.getTime() + daysToAdd * 24 * 60 * 60 * 1000);
+  // format YYYY-MM-DD
+  const yyyy = expiry.getUTCFullYear();
+  const mm = String(expiry.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(expiry.getUTCDate()).padStart(2, '0');
+  return `${yyyy}-${mm}-${dd}`;
 }
 
 // Helper: Try to extract basic lead fields from a plain user message
@@ -100,6 +135,52 @@ function extractFromUserMessage(text) {
   // phone-like (7-15 digits, allow spaces, dashes, parentheses)
   const phoneMatch = text.match(/(?:\+?\d[\d ()-]{6,}\d)/);
   if (phoneMatch) out.contact = out.contact || phoneMatch[0].trim();
+
+  return out;
+}
+
+// Helper: parse membership choice and start date from user text
+function parseMembershipFromMessage(text) {
+  if (!text || typeof text !== 'string') return {};
+  const out = {};
+  const t = text.toLowerCase();
+
+  // membership type
+  if (t.match(/1\s*(month|m)/)) out.membershipType = '1 month';
+  else if (t.match(/\b(one)\s*month\b/)) out.membershipType = '1 month';
+  else if (t.match(/3\s*(months|month|m)/)) out.membershipType = '3 months';
+  else if (t.match(/\b(three)\s*months\b/)) out.membershipType = '3 months';
+  else if (t.match(/6\s*(months|month|m)/)) out.membershipType = '6 months';
+  else if (t.match(/\b(six)\s*months\b/)) out.membershipType = '6 months';
+  else if (t.match(/12\s*(months|month|m)/)) out.membershipType = '12 months';
+  else if (t.match(/\b(twelve)\s*months\b/)) out.membershipType = '12 months';
+
+  // explicit YYYY-MM-DD
+  const ymd = text.match(/(\d{4}-\d{2}-\d{2})/);
+  if (ymd) out.startDate = ymd[1];
+
+  // mm/dd/yyyy or mm/dd/yy
+  const mdy = text.match(/(\d{1,2})\/(\d{1,2})\/(\d{2,4})/);
+  if (mdy && !out.startDate) {
+    let month = Number(mdy[1]);
+    let day = Number(mdy[2]);
+    let year = Number(mdy[3]);
+    if (year < 100) year += 2000;
+    // pad
+    out.startDate = `${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+  }
+
+  // keywords: today, tomorrow
+  if (!out.startDate) {
+    if (t.includes('today')) {
+      const d = new Date();
+      out.startDate = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    } else if (t.includes('tomorrow')) {
+      const d = new Date();
+      d.setDate(d.getDate()+1);
+      out.startDate = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}`;
+    }
+  }
 
   return out;
 }
@@ -158,9 +239,50 @@ app.post('/chat', async (req, res) => {
         if (extracted && Object.keys(extracted).length) {
           sessionsMeta[sid] = Object.assign({}, sessionsMeta[sid] || {}, extracted);
         }
+        // Also try to parse membership and start date from the user's free text
+        const parsedMembership = parseMembershipFromMessage(m.content);
+        if (parsedMembership && Object.keys(parsedMembership).length) {
+          sessionsMeta[sid] = Object.assign({}, sessionsMeta[sid] || {}, parsedMembership);
+        }
       }
     }
     if (!sessionsMeta[sid]) sessionsMeta[sid] = {};
+
+    // If we have a name and contact but haven't asked for membership plan/startDate yet, prompt the user
+    const metaNow = sessionsMeta[sid];
+    if (metaNow.name && metaNow.contact && !metaNow.membershipType && !metaNow.startDate && !metaNow.promptedForMembership) {
+      metaNow.promptedForMembership = true;
+      const prompt = `Which membership plan do you want to choose?\n1 Month\n3 Months\n6 Months\n12 Months\n\nPlease share your membership start date (today or a future date).`;
+      // store assistant prompt in session history and return it immediately (don't call AI)
+      sessions[sid].push({ role: 'assistant', content: prompt });
+      return res.json({ sessionId: sid, aiReply: prompt, leadData: null, leadSent: false });
+    }
+
+    // If we already received membershipType + startDate directly from user messages, create member and forward to webhook
+    if (metaNow.startDate && metaNow.membershipType && !metaNow.membershipSent) {
+      const expiryDate = calculateExpiryDate(metaNow.startDate, metaNow.membershipType);
+      const sheetPayload = {
+        Name: metaNow.name || '',
+        Phone: metaNow.contact || '',
+        StartDate: metaNow.startDate || '',
+        MembershipType: metaNow.membershipType || '',
+        ExpiryDate: expiryDate || '',
+        Status: 'Active'
+      };
+      const memberId = uuidv4();
+      members[memberId] = Object.assign({ id: memberId }, sheetPayload);
+      try {
+        const sendResult = await sendLeadToWebhook(sheetPayload);
+        metaNow.membershipSent = !!(sendResult && sendResult.ok);
+        metaNow.expiryDate = expiryDate;
+        // reply to user with confirmation including expiry date
+        const reply = `Thanks ${metaNow.name || ''}! Your membership starts on ${metaNow.StartDate || metaNow.startDate} and expires on ${expiryDate}. You’ll receive automatic reminders as it approaches.`;
+        sessions[sid].push({ role: 'assistant', content: reply });
+        return res.json({ sessionId: sid, aiReply: reply, leadData: metaNow, leadSent: metaNow.membershipSent, expiryDate });
+      } catch (err) {
+        logger.warn('Failed to send membership to webhook', { err: err?.message, sheetPayload });
+      }
+    }
 
     // Build messages for AI: if we have known lead metadata, add it as a short system-level message so model remembers
     const convo = sessions[sid].slice(); // clone
@@ -178,7 +300,7 @@ app.post('/chat', async (req, res) => {
     messagesForAI.push(...convo);
 
     // Get AI reply (include known lead meta)
-    const aiReply = await getAIReply(messagesForAI);
+    let aiReply = await getAIReply(messagesForAI);
     logger.info({ sessionId: sid, aiReply });
 
     // Persist assistant reply into the session history so future requests have full convo
@@ -188,23 +310,125 @@ app.post('/chat', async (req, res) => {
       logger.warn('Failed to append assistant reply to session', { sessionId: sid, err: e?.message });
     }
 
-    // Extract lead data
+    // Extract lead data (may include optional membership fields)
     const leadData = extractLeadData(aiReply);
     let leadSent = false;
+    let expiryDate = null;
     if (leadData) {
-      // Send to n8n webhook
-      const sendResult = await sendLeadToWebhook(leadData);
-      leadSent = !!(sendResult && sendResult.ok);
-      logger.info({ sessionId: sid, leadData, leadSent, sendResult });
-      // persist partial lead data into session meta so subsequent replies remember it
-      sessionsMeta[sid] = Object.assign({}, sessionsMeta[sid] || {}, leadData);
+      // If membership information is present, calculate expiry and build member record
+      if (leadData.startDate && leadData.membershipType) {
+        expiryDate = calculateExpiryDate(leadData.startDate, leadData.membershipType);
+        // Build object for Google Sheets / n8n webhook with required fields
+        const sheetPayload = {
+          Name: leadData.name || '',
+          Phone: leadData.contact || '',
+          StartDate: leadData.startDate || '',
+          MembershipType: leadData.membershipType || '',
+          ExpiryDate: expiryDate || '',
+          Status: 'Active'
+        };
+
+        // Persist into in-memory members store
+        const memberId = uuidv4();
+        members[memberId] = Object.assign({ id: memberId }, sheetPayload);
+
+        // Send to n8n webhook (Google Sheets) using proxy helper
+        const sendResult = await sendLeadToWebhook(sheetPayload);
+        leadSent = !!(sendResult && sendResult.ok);
+        logger.info({ sessionId: sid, sheetPayload, leadSent, sendResult });
+
+        // Make sure session meta also contains these values for later context
+        sessionsMeta[sid] = Object.assign({}, sessionsMeta[sid] || {}, {
+          name: leadData.name || '',
+          contact: leadData.contact || '',
+          startDate: leadData.startDate,
+          membershipType: leadData.membershipType,
+          expiryDate
+        });
+
+        // Append a short, clear expiry sentence to the AI reply so frontend displays it
+        if (expiryDate) {
+          aiReply = `${aiReply}\n\nYour membership expires on ${expiryDate}. You’ll receive automatic reminders as it approaches.`;
+        }
+      } else {
+        // No membership fields — forward the extracted lead data as before
+        const sendResult = await sendLeadToWebhook(leadData);
+        leadSent = !!(sendResult && sendResult.ok);
+        logger.info({ sessionId: sid, leadData, leadSent, sendResult });
+        sessionsMeta[sid] = Object.assign({}, sessionsMeta[sid] || {}, leadData);
+      }
     }
 
-    // Return AI reply and lead status
-    res.json({ sessionId: sid, aiReply, leadData, leadSent });
+    // Return AI reply and lead status (include expiryDate if available)
+    res.json({ sessionId: sid, aiReply, leadData, leadSent, expiryDate });
   } catch (err) {
     logger.error({ error: err.message, stack: err.stack });
     res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// POST /members - create new member (or lead purchases a plan)
+app.post('/members', async (req, res) => {
+  try {
+    const { name, phone, startDate, membershipType } = req.body || {};
+    if (!name || !phone || !startDate || !membershipType) {
+      return res.status(400).json({ error: 'Missing required fields: name, phone, startDate, membershipType' });
+    }
+
+    const expiryDate = calculateExpiryDate(startDate, membershipType);
+    if (!expiryDate) return res.status(400).json({ error: 'Invalid startDate or membershipType' });
+
+    const memberId = uuidv4();
+    const member = { id: memberId, Name: name, Phone: phone, StartDate: startDate, MembershipType: membershipType, ExpiryDate: expiryDate, Status: 'Active' };
+    members[memberId] = member;
+
+    // Send to webhook
+    try {
+      await sendLeadToWebhook(member);
+    } catch (err) {
+      logger.warn('Failed to send member to webhook', { member, err: err?.message });
+    }
+
+    return res.json({ ok: true, member });
+  } catch (err) {
+    logger.error({ error: err.message });
+    return res.status(500).json({ error: 'Internal server error' });
+  }
+});
+
+// PUT /members/:id - update/renew membership
+app.put('/members/:id', async (req, res) => {
+  try {
+    const id = req.params.id;
+    if (!id || !members[id]) return res.status(404).json({ error: 'Member not found' });
+    const { startDate, membershipType, name, phone } = req.body || {};
+
+    // Update fields if provided
+    if (name) members[id].Name = name;
+    if (phone) members[id].Phone = phone;
+    if (startDate) members[id].StartDate = startDate;
+    if (membershipType) members[id].MembershipType = membershipType;
+
+    // Recalculate expiry if startDate or membershipType changed
+    const sd = members[id].StartDate;
+    const mt = members[id].MembershipType;
+    const expiryDate = calculateExpiryDate(sd, mt);
+    if (expiryDate) members[id].ExpiryDate = expiryDate;
+
+    // Ensure status is Active
+    members[id].Status = 'Active';
+
+    // Send update to webhook
+    try {
+      await sendLeadToWebhook(members[id]);
+    } catch (err) {
+      logger.warn('Failed to send member update to webhook', { member: members[id], err: err?.message });
+    }
+
+    return res.json({ ok: true, member: members[id] });
+  } catch (err) {
+    logger.error({ error: err.message });
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
